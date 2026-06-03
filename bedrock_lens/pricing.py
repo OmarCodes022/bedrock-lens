@@ -30,7 +30,9 @@ import csv
 import io
 import json
 import re
+import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
@@ -51,7 +53,9 @@ class ModelPricing(NamedTuple):
     needs_pricing:      bool
 
 
-OVERRIDES_PATH = Path.home() / ".config" / "bedrock-lens" / "overrides.json"
+OVERRIDES_PATH      = Path.home() / ".config" / "bedrock-lens" / "overrides.json"
+_PRICING_CACHE_PATH = Path.home() / ".config" / "bedrock-lens" / "pricing_cache.json"
+_PRICING_CACHE_TTL  = 86_400  # 24 hours — pricing changes rarely
 
 # Fallback only — overwritten at startup by list_inference_profiles() if available.
 _DEFAULT_CROSS_REGION_PREFIXES: tuple[str, ...] = (
@@ -291,17 +295,6 @@ def _fetch_live_products(region: str) -> dict[str, tuple[float, float, float, fl
         return {}
 
 
-def _fetch_live(region: str) -> tuple[dict, dict]:
-    """Merge both pricing sources into (regional_cache, global_cache).
-
-    CSV covers Anthropic/Claude (regional + global rates).
-    get_products covers Meta, Mistral, DeepSeek, Nova, etc. (regional only).
-    CSV wins on overlap.
-    """
-    csv_regional, csv_global = _fetch_live_csv(region)
-    products = _fetch_live_products(region)
-    return {**products, **csv_regional}, csv_global
-
 
 def _fetch_model_names(bedrock_client) -> dict[str, str]:
     try:
@@ -331,16 +324,65 @@ def _fetch_cross_region_prefixes(bedrock_client) -> tuple[str, ...]:
         return _DEFAULT_CROSS_REGION_PREFIXES
 
 
+def _load_pricing_cache(region: str) -> tuple[dict, dict] | None:
+    """Return (live_cache, global_cache) from disk if fresh, else None."""
+    try:
+        data   = json.loads(_PRICING_CACHE_PATH.read_text())
+        entry  = data[region]
+        if time.time() - entry["timestamp"] > _PRICING_CACHE_TTL:
+            return None
+        load = lambda d: {k: tuple(v) for k, v in d.items()}
+        return load(entry["live"]), load(entry["global"])
+    except Exception:
+        return None
+
+
+def _save_pricing_cache(region: str, live: dict, global_: dict) -> None:
+    try:
+        try:
+            data = json.loads(_PRICING_CACHE_PATH.read_text())
+        except Exception:
+            data = {}
+        data[region] = {"timestamp": time.time(), "live": live, "global": global_}
+        _PRICING_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PRICING_CACHE_PATH.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
 def init_pricing(region: str | None, bedrock_client=None) -> None:
     """Populate all pricing caches. Call once at startup before any lookup()."""
     global _live_cache, _global_cache, _live_sorted, _global_sorted, _overrides, _model_names, _cross_region_prefixes
 
     resolved = region or "us-east-1"
-    if bedrock_client is not None:
-        _model_names           = _fetch_model_names(bedrock_client)
-        _cross_region_prefixes = _fetch_cross_region_prefixes(bedrock_client)
+    cached   = _load_pricing_cache(resolved)
 
-    _live_cache, _global_cache = _fetch_live(resolved)
+    if cached is not None:
+        _live_cache, _global_cache = cached
+        # model names and prefixes are fast and volatile — always fetch fresh
+        if bedrock_client is not None:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                f_names    = pool.submit(_fetch_model_names, bedrock_client)
+                f_prefixes = pool.submit(_fetch_cross_region_prefixes, bedrock_client)
+                _model_names           = f_names.result()
+                _cross_region_prefixes = f_prefixes.result()
+    else:
+        # All four calls are IO-bound and independent — run concurrently
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            f_csv      = pool.submit(_fetch_live_csv, resolved)
+            f_products = pool.submit(_fetch_live_products, resolved)
+            f_names    = pool.submit(_fetch_model_names, bedrock_client) if bedrock_client else None
+            f_prefixes = pool.submit(_fetch_cross_region_prefixes, bedrock_client) if bedrock_client else None
+
+            csv_regional, csv_global = f_csv.result()
+            products                 = f_products.result()
+            if f_names    is not None: _model_names           = f_names.result()
+            if f_prefixes is not None: _cross_region_prefixes = f_prefixes.result()
+
+        _live_cache   = {**products, **csv_regional}
+        _global_cache = csv_global
+        _save_pricing_cache(resolved, _live_cache, _global_cache)
+
     _live_sorted   = sorted(_live_cache.items(),   key=lambda x: -len(x[0]))
     _global_sorted = sorted(_global_cache.items(), key=lambda x: -len(x[0]))
     _overrides = load_overrides()
