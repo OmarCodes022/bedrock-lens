@@ -10,7 +10,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .client import handle_client_error
-from .cloudwatch import iter_log_events, aggregate, get_time_range, parse_since, normalize_model_id
+from .cloudwatch import iter_log_events, aggregate, get_time_range, parse_since
 from .display import build_table, total_cost, period_label, since_label
 from .pricing import init_pricing, lookup, save_override, OVERRIDES_PATH, get_model_display_name
 
@@ -156,34 +156,19 @@ def run_live(client, bedrock_client, period: str, threshold: float | None, since
 
     def ingest(from_ms: int) -> None:
         to_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        new_records = []
         try:
             for r in iter_log_events(client, from_ms, to_ms):
                 eid = r.get("_eventId", "")
-                if eid and eid in seen_ids:
+                if eid in seen_ids:
                     continue
                 if eid:
                     seen_ids.add(eid)
-                model    = normalize_model_id(r.get("modelId", "unknown"))
-                inp_data = r.get("input") or {}
-                inp = inp_data.get("inputTokenCount")           or 0
-                cw  = inp_data.get("cacheWriteInputTokenCount") or 0
-                cr  = inp_data.get("cacheReadInputTokenCount")  or 0
-                out = (r.get("output") or {}).get("outputTokenCount") or 0
-                if model not in usage:
-                    usage[model] = {
-                        "calls": 0,
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "cache_write_tokens": 0,
-                        "cache_read_tokens": 0,
-                    }
-                usage[model]["calls"]              += 1
-                usage[model]["input_tokens"]       += inp
-                usage[model]["output_tokens"]      += out
-                usage[model]["cache_write_tokens"] += cw
-                usage[model]["cache_read_tokens"]  += cr
+                new_records.append(r)
         except ClientError as exc:
             handle_client_error(exc)
+            return
+        aggregate(new_records, into=usage)
 
     def render(last_update: str) -> Panel:
         body = build_table(usage) if usage else Text("Waiting for Bedrock invocations…", style="dim italic")
