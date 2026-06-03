@@ -164,7 +164,7 @@ def cleanup_overrides() -> int:
         return 0
     to_remove = [
         mid for mid in list(_overrides)
-        if any(live_key in _normalize(mid) for live_key in _live_sorted)
+        if any(live_key in _normalize(mid) for live_key, _ in _live_sorted)
     ]
     if to_remove:
         for mid in to_remove:
