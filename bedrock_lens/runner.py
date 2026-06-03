@@ -56,31 +56,49 @@ def _prompt_for_pricing(model_ids: list[str]) -> None:
 
         try:
             raw_name = input(prompt_name).strip()
-            display_name = raw_name or suggested
-
-            raw_in = input("  Input price per 1M tokens  (USD): ").strip()
-            input_per_1m = float(raw_in)
-
-            raw_out = input("  Output price per 1M tokens (USD): ").strip()
-            output_per_1m = float(raw_out)
-
-            # Cache pricing — offer standard-ratio defaults so the user can
-            # just press Enter for models that follow Anthropic's conventions
-            default_cw = round(input_per_1m * 1.25, 4)
-            default_cr = round(input_per_1m * 0.10, 4)
-
-            raw_cw = input(
-                f"  Cache write price per 1M tokens [{default_cw} (1.25× input), Enter to accept]: "
-            ).strip()
-            cache_write_per_1m = float(raw_cw) if raw_cw else default_cw
-
-            raw_cr = input(
-                f"  Cache read price per 1M tokens  [{default_cr} (0.10× input), Enter to accept]: "
-            ).strip()
-            cache_read_per_1m = float(raw_cr) if raw_cr else default_cr
-
-        except (ValueError, EOFError, KeyboardInterrupt):
+        except (EOFError, KeyboardInterrupt):
             console.print(f"  [dim]Skipped — {model_id} will show N/A cost.[/dim]")
+            continue
+        display_name = raw_name or suggested
+
+        def _prompt_float(prompt: str, default: float | None = None) -> float | None:
+            """Prompt for a float, retrying on bad input. Returns None on skip."""
+            while True:
+                try:
+                    raw = input(prompt).strip()
+                    if not raw and default is not None:
+                        return default
+                    return float(raw)
+                except ValueError:
+                    hint = "Enter to accept default, or " if default is not None else ""
+                    console.print(f"  [red]Invalid value — {hint}please enter a number (or Ctrl+C to skip).[/red]")
+                except (EOFError, KeyboardInterrupt):
+                    console.print(f"  [dim]Skipped — {model_id} will show N/A cost.[/dim]")
+                    return None
+
+        input_per_1m = _prompt_float("  Input price per 1M tokens  (USD): ")
+        if input_per_1m is None:
+            continue
+
+        output_per_1m = _prompt_float("  Output price per 1M tokens (USD): ")
+        if output_per_1m is None:
+            continue
+
+        default_cw = round(input_per_1m * 1.25, 4)
+        default_cr = round(input_per_1m * 0.10, 4)
+
+        cache_write_per_1m = _prompt_float(
+            f"  Cache write price per 1M tokens [{default_cw} (1.25x input), Enter to accept]: ",
+            default=default_cw,
+        )
+        if cache_write_per_1m is None:
+            continue
+
+        cache_read_per_1m = _prompt_float(
+            f"  Cache read price per 1M tokens  [{default_cr} (0.10x input), Enter to accept]: ",
+            default=default_cr,
+        )
+        if cache_read_per_1m is None:
             continue
 
         save_override(
