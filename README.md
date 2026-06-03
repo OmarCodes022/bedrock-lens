@@ -65,22 +65,29 @@ If you don't have IAM permissions to create roles, the wizard prints the exact p
 
 ## How it works
 
-Bedrock writes a JSON record to `/aws/bedrock/model-invocations` in CloudWatch for every model call. Each record contains the model ID, input token count, and output token count. `bedrock-lens` reads those records, applies per-model pricing, and renders the table.
+Bedrock writes a JSON record to `/aws/bedrock/model-invocations` in CloudWatch for every model call. Each record contains the model ID, input token counts, and output token count. `bedrock-lens` reads those records, applies per-model pricing, and renders the table.
 
-Live mode (`--live`) polls every 5 seconds with a 90-second overlap window to handle CloudWatch's ingestion delay, deduplicating events by ID so nothing gets double-counted.
+**Prompt cache tracking:** Bedrock logs cache writes and cache reads as separate token counts from regular input tokens, each billed at a different rate. `bedrock-lens` tracks all three buckets independently and prices them correctly. Cache Write and Cache Read columns appear in the table automatically when any model in the current window has cache activity.
 
-## Supported models
+**Live mode** (`--live`) polls every 5 seconds with a 90-second overlap window to handle CloudWatch's ingestion delay, deduplicating events by ID so nothing gets double-counted.
 
-All models available on Amazon Bedrock are displayed with token counts. Cost estimation works as follows:
+## Pricing
 
-**Live pricing (via AWS Price List API):** Llama 3 / 3.1 / 3.2 / 3.3 / 4, Mistral, Mixtral, DeepSeek, Gemma, Qwen3, Nova, Kimi, MiniMax, Nemotron, GLM, and 50+ others. Prices are fetched at runtime for your region, so they stay up to date automatically.
+Prices are fetched live at startup from two AWS sources and merged:
 
-**Hardcoded fallback:** Claude (Haiku, Sonnet, Opus — v3 through v4), Amazon Titan, Cohere Command R / R+, AI21 Jamba. AWS hasn't added these to the Price List API yet, so prices are bundled with the tool and updated on each release.
+**`AmazonBedrockFoundationModels` price list CSV** — the primary source for Anthropic/Claude models (including the latest 4.x releases), Cohere, AI21, and legacy models. Downloaded via `list_price_lists` + `get_price_list_file_url` for your specific region. Uses the standard on-demand Global rate rather than the geo-CRIS regional premium.
 
-Token counts are always accurate for every model — they come directly from CloudWatch logs written by Bedrock itself. Only cost estimation depends on the pricing source; unknown models show `N/A` for cost but tokens are never affected.
+**`AmazonBedrock` Price List API** — covers all other providers: Meta (Llama), Mistral, DeepSeek, Google (Gemma), Amazon Nova, Nvidia, Qwen, and 50+ more. Prices are region-specific and update automatically.
+
+For any model not yet in either source — typically new releases in the days before AWS adds them to the catalogue — the tool prompts you to enter the price once and saves it to `~/.config/bedrock-lens/overrides.json`. The entry is removed automatically the next time the model appears in the live pricing data.
+
+Token counts are always accurate for every model regardless of pricing status — they come directly from CloudWatch logs written by Bedrock itself. Unknown models show `N/A` for cost but token counts are never affected.
 
 ## Requirements
 
 - Python 3.9+
-- AWS credentials with `logs:FilterLogEvents` on `/aws/bedrock/model-invocations`
+- AWS credentials with:
+  - `logs:FilterLogEvents` on `/aws/bedrock/model-invocations`
+  - `bedrock:ListFoundationModels` and `bedrock:ListInferenceProfiles` for live model discovery
+  - `pricing:ListPriceLists` and `pricing:GetPriceListFileUrl` for live pricing
 - Bedrock model invocation logging enabled (run `--setup` if not)

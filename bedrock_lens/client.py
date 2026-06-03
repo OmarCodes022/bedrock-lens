@@ -11,12 +11,10 @@ from .cloudwatch import LOG_GROUP
 console = Console()
 
 
-def make_client(region: str | None, profile: str | None):
-    """Create a CloudWatch Logs boto3 client, exiting with a readable error on failure."""
+def _make_session(region: str | None, profile: str | None) -> boto3.Session:
+    """Create a boto3 Session, exiting with a readable error on credential/region failures."""
     try:
-        session = boto3.Session(profile_name=profile, region_name=region)
-        resolved_region = session.region_name
-        return session.client("logs")
+        return boto3.Session(profile_name=profile, region_name=region)
     except ProfileNotFound as exc:
         console.print(f"[red]AWS profile not found:[/red] {exc}")
         sys.exit(1)
@@ -27,10 +25,38 @@ def make_client(region: str | None, profile: str | None):
             "[bold]AWS_ACCESS_KEY_ID[/bold] / [bold]AWS_SECRET_ACCESS_KEY[/bold]."
         )
         sys.exit(1)
+
+
+def make_client(region: str | None, profile: str | None):
+    """Create a CloudWatch Logs boto3 client, exiting with a readable error on failure."""
+    session = _make_session(region, profile)
+    try:
+        return session.client("logs")
     except NoRegionError:
-        if resolved_region:
+        resolved = session.region_name
+        if resolved:
             console.print(
-                f"[red]CloudWatch Logs is not available in region: {resolved_region}[/red]\n"
+                f"[red]CloudWatch Logs is not available in region: {resolved}[/red]\n"
+                "Pass [bold]--region[/bold] with a supported region."
+            )
+        else:
+            console.print(
+                "[red]No AWS region configured.[/red] "
+                "Pass [bold]--region[/bold] or set [bold]AWS_DEFAULT_REGION[/bold]."
+            )
+        sys.exit(1)
+
+
+def make_bedrock_client(region: str | None, profile: str | None):
+    """Create an Amazon Bedrock boto3 client for model/profile discovery."""
+    session = _make_session(region, profile)
+    try:
+        return session.client("bedrock")
+    except NoRegionError:
+        resolved = session.region_name
+        if resolved:
+            console.print(
+                f"[red]Amazon Bedrock is not available in region: {resolved}[/red]\n"
                 "Pass [bold]--region[/bold] with a supported region."
             )
         else:

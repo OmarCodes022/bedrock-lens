@@ -12,7 +12,7 @@ from rich.text import Text
 from .client import handle_client_error
 from .cloudwatch import iter_log_events, aggregate, get_time_range, parse_since, normalize_model_id
 from .display import build_table, total_cost, period_label, since_label
-from .pricing import init_pricing
+from .pricing import init_pricing, lookup, save_override, OVERRIDES_PATH, get_model_display_name
 
 console = Console()
 
@@ -32,10 +32,75 @@ def _resolve(period: str, since: str | None, live: bool = False) -> tuple[int, i
     return start_ms, end_ms, label
 
 
-def run_once(client, period: str, threshold: float | None, since: str | None) -> None:
+def _prompt_for_pricing(model_ids: list[str]) -> None:
+    """Interactively prompt the user to enter pricing for models not yet in the
+    AWS Price List API.  Prices are saved to the user's overrides config file so
+    they don't need to be re-entered on subsequent runs.
+    """
+    if not model_ids:
+        return
+
+    console.print(
+        "\n[yellow]The following model(s) are missing pricing data "
+        "(not yet in the AWS Price List API):[/yellow]"
+    )
+
+    for model_id in model_ids:
+        console.print(f"\n  [bold cyan]{model_id}[/bold cyan]")
+
+        suggested = get_model_display_name(model_id)
+        if suggested != model_id:
+            prompt_name = f"  Display name [{suggested}]: "
+        else:
+            prompt_name = "  Display name (Enter to use model ID): "
+
+        try:
+            raw_name = input(prompt_name).strip()
+            display_name = raw_name or suggested
+
+            raw_in = input("  Input price per 1M tokens  (USD): ").strip()
+            input_per_1m = float(raw_in)
+
+            raw_out = input("  Output price per 1M tokens (USD): ").strip()
+            output_per_1m = float(raw_out)
+
+            # Cache pricing — offer standard-ratio defaults so the user can
+            # just press Enter for models that follow Anthropic's conventions
+            default_cw = round(input_per_1m * 1.25, 4)
+            default_cr = round(input_per_1m * 0.10, 4)
+
+            raw_cw = input(
+                f"  Cache write price per 1M tokens [{default_cw} (1.25× input), Enter to accept]: "
+            ).strip()
+            cache_write_per_1m = float(raw_cw) if raw_cw else default_cw
+
+            raw_cr = input(
+                f"  Cache read price per 1M tokens  [{default_cr} (0.10× input), Enter to accept]: "
+            ).strip()
+            cache_read_per_1m = float(raw_cr) if raw_cr else default_cr
+
+        except (ValueError, EOFError, KeyboardInterrupt):
+            console.print(f"  [dim]Skipped — {model_id} will show N/A cost.[/dim]")
+            continue
+
+        save_override(
+            model_id, input_per_1m, output_per_1m,
+            cache_write_per_1m, cache_read_per_1m, display_name,
+        )
+        console.print(f"  [green]Saved to {OVERRIDES_PATH}[/green]")
+
+    console.print()
+
+
+def _collect_unknown_models(usage: dict[str, dict]) -> list[str]:
+    """Return model IDs in usage that have no pricing data."""
+    return [mid for mid in usage if lookup(mid).needs_pricing]
+
+
+def run_once(client, bedrock_client, period: str, threshold: float | None, since: str | None) -> None:
     start_ms, end_ms, label = _resolve(period, since)
 
-    init_pricing(client.meta.region_name)
+    init_pricing(client.meta.region_name, bedrock_client)
     console.print(f"[dim]Fetching {label} from CloudWatch…[/dim]")
 
     try:
@@ -54,6 +119,10 @@ def run_once(client, period: str, threshold: float | None, since: str | None) ->
         )
         return
 
+    unknown = _collect_unknown_models(usage)
+    if unknown:
+        _prompt_for_pricing(unknown)
+
     console.print()
     console.print(build_table(usage, title=f"Bedrock Usage — {label}"))
     console.print()
@@ -67,8 +136,8 @@ def run_once(client, period: str, threshold: float | None, since: str | None) ->
             )
 
 
-def run_live(client, period: str, threshold: float | None, since: str | None) -> None:
-    init_pricing(client.meta.region_name)
+def run_live(client, bedrock_client, period: str, threshold: float | None, since: str | None) -> None:
+    init_pricing(client.meta.region_name, bedrock_client)
     start_ms, _, label = _resolve(period, since, live=True)
 
     # --since gives a relative label that goes stale as the tool runs.
@@ -94,14 +163,25 @@ def run_live(client, period: str, threshold: float | None, since: str | None) ->
                     continue
                 if eid:
                     seen_ids.add(eid)
-                model = normalize_model_id(r.get("modelId", "unknown"))
-                inp   = (r.get("input")  or {}).get("inputTokenCount")  or 0
-                out   = (r.get("output") or {}).get("outputTokenCount") or 0
+                model    = normalize_model_id(r.get("modelId", "unknown"))
+                inp_data = r.get("input") or {}
+                inp = inp_data.get("inputTokenCount")           or 0
+                cw  = inp_data.get("cacheWriteInputTokenCount") or 0
+                cr  = inp_data.get("cacheReadInputTokenCount")  or 0
+                out = (r.get("output") or {}).get("outputTokenCount") or 0
                 if model not in usage:
-                    usage[model] = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
-                usage[model]["calls"]         += 1
-                usage[model]["input_tokens"]  += inp
-                usage[model]["output_tokens"] += out
+                    usage[model] = {
+                        "calls": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_write_tokens": 0,
+                        "cache_read_tokens": 0,
+                    }
+                usage[model]["calls"]              += 1
+                usage[model]["input_tokens"]       += inp
+                usage[model]["output_tokens"]      += out
+                usage[model]["cache_write_tokens"] += cw
+                usage[model]["cache_read_tokens"]  += cr
         except ClientError as exc:
             handle_client_error(exc)
 
@@ -120,6 +200,12 @@ def run_live(client, period: str, threshold: float | None, since: str | None) ->
 
     console.print("[dim]Loading initial data…[/dim]")
     ingest(start_ms)
+
+    # Prompt for any unknown models before the live display takes over the terminal
+    unknown = _collect_unknown_models(usage)
+    if unknown:
+        _prompt_for_pricing(unknown)
+
     poll_from_ms = int(datetime.now(timezone.utc).timestamp() * 1000) - _LIVE_OVERLAP_MS
 
     with Live(render(datetime.now().strftime("%H:%M:%S")), refresh_per_second=2, console=console) as live:

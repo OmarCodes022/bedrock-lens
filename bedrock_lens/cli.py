@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import click
 
-from .client import make_client
+from .client import make_client, make_bedrock_client
 from .cloudwatch import parse_since
 from .runner import run_once, run_live
 from .setup_cmd import run_setup
@@ -63,9 +63,10 @@ def main(
         except ValueError as exc:
             raise click.BadParameter(str(exc), param_hint="--since") from exc
 
-    client = make_client(region, profile)
+    client         = make_client(region, profile)
+    bedrock_client = make_bedrock_client(region, profile)
 
     if live:
-        run_live(client, period, threshold, since)
+        run_live(client, bedrock_client, period, threshold, since)
     else:
-        run_once(client, period, threshold, since)
+        run_once(client, bedrock_client, period, threshold, since)

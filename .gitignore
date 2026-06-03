@@ -40,3 +40,7 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# Local dev / scratch files
+test.py
+test_prices.json

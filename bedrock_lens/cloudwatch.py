@@ -86,33 +86,50 @@ def iter_log_events(
         kwargs["nextToken"] = token
 
 
-_CROSS_REGION_PREFIXES = ("us.", "eu.", "ap.", "us-gov.", "global.")
-
-
 def normalize_model_id(model_id: str) -> str:
     """Normalize model ID so all variants of the same model merge into one row.
 
-    Handles cross-region prefixes (us., eu., global.) and full ARNs
-    (arn:aws:bedrock:...:inference-profile/us.anthropic.X).
+    Strips full ARNs down to the model/profile ID, then removes any
+    cross-region geographic prefix (us., eu., ap., …).  The prefix list is
+    fetched dynamically from list_inference_profiles() at startup via
+    pricing.get_cross_region_prefixes(), so it stays current without code
+    changes when AWS adds new geographic regions.
     """
+    from .pricing import get_cross_region_prefixes  # late import avoids circular dep
+
     if model_id.startswith("arn:"):
         model_id = model_id.split("/")[-1]
-    for prefix in _CROSS_REGION_PREFIXES:
+    for prefix in get_cross_region_prefixes():
         if model_id.startswith(prefix):
             return model_id[len(prefix):]
     return model_id
 
 
 def aggregate(records) -> dict[str, dict]:
-    """Sum token counts and call counts keyed by normalized modelId."""
+    """Sum token counts and call counts keyed by normalized modelId.
+
+    Input tokens are split into three buckets that map to different billing
+    rates: regular input, prompt-cache writes, and prompt-cache reads.
+    """
     usage: dict[str, dict] = {}
     for r in records:
-        model = normalize_model_id(r.get("modelId", "unknown"))
-        inp = (r.get("input") or {}).get("inputTokenCount") or 0
+        model    = normalize_model_id(r.get("modelId", "unknown"))
+        inp_data = r.get("input") or {}
+        inp = inp_data.get("inputTokenCount")           or 0
+        cw  = inp_data.get("cacheWriteInputTokenCount") or 0
+        cr  = inp_data.get("cacheReadInputTokenCount")  or 0
         out = (r.get("output") or {}).get("outputTokenCount") or 0
         if model not in usage:
-            usage[model] = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
-        usage[model]["calls"] += 1
-        usage[model]["input_tokens"] += inp
-        usage[model]["output_tokens"] += out
+            usage[model] = {
+                "calls": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_write_tokens": 0,
+                "cache_read_tokens": 0,
+            }
+        usage[model]["calls"]              += 1
+        usage[model]["input_tokens"]       += inp
+        usage[model]["output_tokens"]      += out
+        usage[model]["cache_write_tokens"] += cw
+        usage[model]["cache_read_tokens"]  += cr
     return usage
