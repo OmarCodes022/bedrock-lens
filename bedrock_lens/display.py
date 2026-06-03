@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from rich import box
 from rich.table import Table
 
-from .pricing import lookup, calculate_cost
+from .pricing import lookup
 
 
 def period_label(period: str) -> str:
@@ -86,9 +86,12 @@ def build_table(usage: dict[str, dict], title: str = "") -> Table:
         cr    = stats.get("cache_read_tokens",  0)
         calls = stats["calls"]
 
-        p     = lookup(model_id)
+        p     = lookup(model_id, prefer_global=stats.get("is_global", False))
         known = not p.needs_pricing
-        cost  = calculate_cost(model_id, inp, out, cw, cr)
+        cost  = (
+            inp * p.input_per_1m + out * p.output_per_1m
+            + cw * p.cache_write_per_1m + cr * p.cache_read_per_1m
+        ) / 1_000_000
 
         total_calls       += calls
         total_input       += inp
@@ -119,13 +122,13 @@ def build_table(usage: dict[str, dict], title: str = "") -> Table:
 
 
 def total_cost(usage: dict[str, dict]) -> float:
-    return sum(
-        calculate_cost(
-            mid,
-            s["input_tokens"],
-            s["output_tokens"],
-            s.get("cache_write_tokens", 0),
-            s.get("cache_read_tokens",  0),
-        )
-        for mid, s in usage.items()
-    )
+    total = 0.0
+    for mid, s in usage.items():
+        p = lookup(mid, prefer_global=s.get("is_global", False))
+        total += (
+            s["input_tokens"]              * p.input_per_1m
+            + s["output_tokens"]           * p.output_per_1m
+            + s.get("cache_write_tokens", 0) * p.cache_write_per_1m
+            + s.get("cache_read_tokens",  0) * p.cache_read_per_1m
+        ) / 1_000_000
+    return total

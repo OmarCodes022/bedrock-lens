@@ -19,7 +19,7 @@ def get_time_range(period: str) -> tuple[int, int]:
     elif period == "yesterday":
         y = now - timedelta(days=1)
         start = y.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = y.replace(hour=23, minute=59, second=59, microsecond=999000)
+        end = y.replace(hour=23, minute=59, second=59, microsecond=999999)
     elif period == "week":
         start = now - timedelta(days=7)
         end = now
@@ -101,20 +101,22 @@ def normalize_model_id(model_id: str) -> str:
         model_id = model_id.split("/")[-1]
     for prefix in get_cross_region_prefixes():
         if model_id.startswith(prefix):
-            return model_id[len(prefix):]
-    return model_id
+            model_id = model_id[len(prefix):]
+            break
+    return re.sub(r':\d+$', '', model_id)  # strip version suffix e.g. :0, :1
 
 
-def aggregate(records) -> dict[str, dict]:
+def aggregate(records, into: dict[str, dict] | None = None) -> dict[str, dict]:
     """Sum token counts and call counts keyed by normalized modelId.
 
-    Input tokens are split into three buckets that map to different billing
-    rates: regular input, prompt-cache writes, and prompt-cache reads.
+    Pass `into` to merge results into an existing usage dict (live mode).
     """
-    usage: dict[str, dict] = {}
+    usage: dict[str, dict] = into if into is not None else {}
     for r in records:
-        model    = normalize_model_id(r.get("modelId", "unknown"))
-        inp_data = r.get("input") or {}
+        raw_id    = r.get("modelId", "unknown")
+        is_global = raw_id.lower().startswith("global.")
+        model     = normalize_model_id(raw_id)
+        inp_data  = r.get("input") or {}
         inp = inp_data.get("inputTokenCount")           or 0
         cw  = inp_data.get("cacheWriteInputTokenCount") or 0
         cr  = inp_data.get("cacheReadInputTokenCount")  or 0
@@ -126,10 +128,12 @@ def aggregate(records) -> dict[str, dict]:
                 "output_tokens": 0,
                 "cache_write_tokens": 0,
                 "cache_read_tokens": 0,
+                "is_global": False,
             }
         usage[model]["calls"]              += 1
         usage[model]["input_tokens"]       += inp
         usage[model]["output_tokens"]      += out
         usage[model]["cache_write_tokens"] += cw
         usage[model]["cache_read_tokens"]  += cr
+        usage[model]["is_global"]           = usage[model]["is_global"] or is_global
     return usage
