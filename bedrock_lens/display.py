@@ -72,6 +72,8 @@ def build_table(usage: dict[str, dict], title: str = "") -> Table:
         table.add_column("Cache Write", style="blue",       justify="right", footer_style="bold blue")
         table.add_column("Cache Read",  style="cyan",       justify="right", footer_style="bold cyan")
     table.add_column("Output Tokens", style="yellow",       justify="right", footer_style="bold yellow")
+    if not has_cache:
+        table.add_column("Total Tokens", style="white",     justify="right", footer_style="bold white")
     table.add_column("Est. Cost",     style="magenta",      justify="right", footer_style="bold magenta")
 
     total_calls = total_input = total_output = 0
@@ -105,7 +107,10 @@ def build_table(usage: dict[str, dict], title: str = "") -> Table:
         row = [p.display_name, str(calls), _fmt_tokens(inp)]
         if has_cache:
             row += [_fmt_tokens(cw), _fmt_tokens(cr)]
-        row += [_fmt_tokens(out), _fmt_cost(cost, known)]
+        row += [_fmt_tokens(out)]
+        if not has_cache:
+            row += [_fmt_tokens(inp + out)]
+        row += [_fmt_cost(cost, known)]
         table.add_row(*row)
 
     # Footer column index depends on whether cache columns are present
@@ -116,6 +121,8 @@ def build_table(usage: dict[str, dict], title: str = "") -> Table:
         table.columns[col].footer = _fmt_tokens(total_cache_write); col += 1
         table.columns[col].footer = _fmt_tokens(total_cache_read);  col += 1
     table.columns[col].footer = _fmt_tokens(total_output); col += 1
+    if not has_cache:
+        table.columns[col].footer = _fmt_tokens(total_input + total_output); col += 1
     table.columns[col].footer = _fmt_cost(total_cost_val, all_prices_known)
 
     return table
