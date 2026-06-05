@@ -1,3 +1,4 @@
+# hi from claude code
 from __future__ import annotations
 
 import click
